@@ -1,0 +1,307 @@
+name: Setup Rust Toolchain for GitHub CI
+description: |
+  Setup specific Rust versions with caching pre-configured.
+  It provides problem matchers for cargo and rustfmt issues.
+
+branding:
+  icon: "play"
+  color: "gray-dark"
+
+# Add option to install directly from rust-toolchain file
+# Blocked on rustup support: https://github.com/rust-lang/rustup/issues/2686
+#
+# The action is heavily inspired by https://github.com/step-security/dtolnay-rust-toolchain
+inputs:
+  toolchain:
+    description: "Comma-separated list of Rust toolchain specifications. Last version becomes the default. -- see https://rust-lang.github.io/rustup/concepts/toolchains.html#toolchain-specification"
+    required: false
+  target:
+    description: "Target triple to install for this toolchain"
+    required: false
+  components:
+    description: "Comma-separated list of components to be additionally installed"
+    required: false
+  cache:
+    description: "Automatically configure Rust cache"
+    required: false
+    default: "true"
+  cache-workspaces:
+    description: "Paths to multiple Cargo workspaces and their target directories, separated by newlines."
+    required: false
+  cache-directories:
+    description: "Additional non workspace directories to be cached, separated by newlines."
+    required: false
+  cache-on-failure:
+    description: "Cache even if the build fails."
+    default: "true"
+    required: false
+  cache-key:
+    description: "An additional cache key that is added alongside the automatic `job`-based cache key and can be used to further differentiate jobs."
+    required: false
+  cache-shared-key:
+    description: "A cache key that is used instead of the automatic `job`-based key, and is stable over multiple jobs."
+    required: false
+  cache-bin:
+    description: "Determines whether to cache ${CARGO_HOME}/bin."
+    required: false
+    default: "true"
+  cache-provider:
+    description: "Determines which provider to use for caching. Options are github, buildjet, or warpbuild. Defaults to github."
+    required: false
+    default: "github"
+  cache-all-crates:
+    description: "Determines which crates are cached. If `true` all crates will be cached, otherwise only dependent crates will be cached."
+    required: false
+    default: "false"
+  cache-workspace-crates:
+    description: "Determines which crates are cached. If `true` all crates will be cached, otherwise only dependent crates will be cached."
+    required: false
+    default: "false"
+  cache-save-if:
+    description: "Determines whether the cache should be saved. If `false`, the cache is only restored."
+    required: false
+    default: "true"
+  matcher:
+    description: "Enable the Rust problem matcher"
+    required: false
+    default: "true"
+  rustflags:
+    description: "set RUSTFLAGS environment variable, set to empty string to avoid overwriting build.rustflags"
+    required: false
+    default: "-D warnings"
+  override:
+    description: "Setup the last installed toolchain as the default via `rustup override`"
+    required: false
+    default: "true"
+  rust-src-dir:
+    description: "Specify path from root directory to the Rust source directory. By default root directory will be used."
+    required: false
+
+outputs:
+  rustc-version:
+    description: "Version as reported by `rustc --version`"
+    value: ${{steps.versions.outputs.rustc-version}}
+  cargo-version:
+    description: "Version as reported by `cargo --version`"
+    value: ${{steps.versions.outputs.cargo-version}}
+  rustup-version:
+    description: "Version as reported by `rustup --version`"
+    value: ${{steps.versions.outputs.rustup-version}}
+  cachekey:
+    description: A short hash of the rustc version, appropriate for use as a cache key. "20220627a831"
+    value: ${{steps.versions.outputs.cachekey}}
+
+# All local variables are using the `_srt_` prefix (for setup-rust-toolchain)
+# this is to avoid conflicts with globally existing variables, as some names are quite generic (e.g., toolchain)
+# This has caused issues in the past.
+runs:
+  using: composite
+  steps:
+    - name: Subscription check
+      env:
+        REPO_PRIVATE: ${{ github.event.repository.private }}
+      run: |
+        # validate subscription status
+        UPSTREAM="actions-rust-lang/setup-rust-toolchain"
+        ACTION_REPO="${GITHUB_ACTION_REPOSITORY:-}"
+        DOCS_URL="https://docs.stepsecurity.io/actions/stepsecurity-maintained-actions"
+
+        echo ""
+        echo -e "\033[1;36mStepSecurity Maintained Action\033[0m"
+        echo "Secure drop-in replacement for $UPSTREAM"
+        if [ "$REPO_PRIVATE" = "false" ]; then
+          echo -e "\033[32m✓ Free for public repositories\033[0m"
+        fi
+        echo -e "\033[36mLearn more:\033[0m $DOCS_URL"
+        echo ""
+
+        if [ "$REPO_PRIVATE" != "false" ]; then
+          SERVER_URL="${GITHUB_SERVER_URL:-https://github.com}"
+
+          if [ "$SERVER_URL" != "https://github.com" ]; then
+            BODY=$(printf '{"action":"%s","ghes_server":"%s"}' "$ACTION_REPO" "$SERVER_URL")
+          else
+            BODY=$(printf '{"action":"%s"}' "$ACTION_REPO")
+          fi
+
+          API_URL="https://agent.api.stepsecurity.io/v1/github/$GITHUB_REPOSITORY/actions/maintained-actions-subscription"
+
+          RESPONSE=$(curl --max-time 3 -s -w "%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "$BODY" \
+            "$API_URL" -o /dev/null) && CURL_EXIT_CODE=0 || CURL_EXIT_CODE=$?
+
+          if [ $CURL_EXIT_CODE -ne 0 ]; then
+            echo "Timeout or API not reachable. Continuing to next step."
+          elif [ "$RESPONSE" = "403" ]; then
+            echo -e "::error::\033[1;31mThis action requires a StepSecurity subscription for private repositories.\033[0m"
+            echo -e "::error::\033[31mLearn how to enable a subscription: $DOCS_URL\033[0m"
+            exit 1
+          fi
+        fi
+      shell: bash
+
+    # The later code uses "newer" bash features, which are not available in the ancient bash 3 (from 2014) of macOS
+    - name: Unbork mac
+      if: runner.os == 'macOS'
+      run: |
+        brew install bash
+      shell: bash
+
+    - id: flags
+      env:
+        _srt_targets: ${{inputs.target}}
+        _srt_components: ${{inputs.components}}
+      shell: bash
+      run: |
+        : construct rustup command line
+        echo "targets=$(for t in ${_srt_targets//,/ }; do echo -n ' --target' $t; done)" >> $GITHUB_OUTPUT
+        echo "components=$(for c in ${_srt_components//,/ }; do echo -n ' --component' $c; done)" >> $GITHUB_OUTPUT
+        echo "downgrade=${{contains(inputs.toolchain, 'nightly') && inputs.components && ' --allow-downgrade' || ''}}" >> $GITHUB_OUTPUT
+
+    # The environment variables always need to be set before the caching action
+    - name: Setting Environment Variables
+      env:
+        _srt_NEW_RUSTFLAGS: ${{inputs.rustflags}}
+      shell: bash
+      run: |
+        if [[ ! -v CARGO_INCREMENTAL ]]; then
+          echo "CARGO_INCREMENTAL=0" >> $GITHUB_ENV
+        fi
+        if [[ ! -v CARGO_PROFILE_DEV_DEBUG ]]; then
+          echo "CARGO_PROFILE_DEV_DEBUG=0" >> $GITHUB_ENV
+        fi
+        if [[ ! -v CARGO_TERM_COLOR ]]; then
+          echo "CARGO_TERM_COLOR=always" >> $GITHUB_ENV
+        fi
+        if [[ ! -v RUST_BACKTRACE ]]; then
+          echo "RUST_BACKTRACE=short" >> $GITHUB_ENV
+        fi
+        if [[ ( ! -v RUSTFLAGS ) && $_srt_NEW_RUSTFLAGS != "" ]]; then
+          echo "RUSTFLAGS=$_srt_NEW_RUSTFLAGS" >> $GITHUB_ENV
+        fi
+        # Enable faster sparse index on nightly
+        # The value is ignored on stable and causes no problems
+        # https://internals.rust-lang.org/t/call-for-testing-cargo-sparse-registry/16862
+        if [[ ! -v CARGO_UNSTABLE_SPARSE_REGISTRY ]]; then
+          echo "CARGO_UNSTABLE_SPARSE_REGISTRY=true" >> $GITHUB_ENV
+        fi
+        if [[ ! -v CARGO_REGISTRIES_CRATES_IO_PROTOCOL ]]; then
+          echo "CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse" >> $GITHUB_ENV
+        fi
+
+    - name: Install Rust Problem Matcher
+      if: inputs.matcher == 'true'
+      shell: bash
+      run: echo "::add-matcher::${{ github.action_path }}/rust.json"
+
+    - name: Install rustup, if needed
+      shell: bash
+      run: |
+        if ! command -v rustup &> /dev/null ; then
+          curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused -fsSL "https://sh.rustup.rs" | sh -s -- --default-toolchain none -y
+
+          # Resolve the correct CARGO_HOME path depending on OS
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            echo "${CARGO_HOME:-$USERPROFILE/.cargo}/bin" | sed 's|/|\\|g' >> $GITHUB_PATH
+          else
+            echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> $GITHUB_PATH
+          fi
+        fi
+      env:
+        RUNNER_OS: "${{ runner.os }}"
+
+    - name: rustup toolchain install ${{inputs.toolchain || 'stable'}}
+      env:
+        _srt_toolchain: ${{inputs.toolchain}}
+        _srt_targets: ${{inputs.target}}
+        _srt_components: ${{inputs.components}}
+        _srt_override: ${{inputs.override}}
+        _srt_rust_src_dir: ${{inputs.rust-src-dir}}
+        _srt_flags_targets: ${{steps.flags.outputs.targets}}
+        _srt_flags_components: ${{steps.flags.outputs.components}}
+        _srt_flags_downgrade: ${{steps.flags.outputs.downgrade}}
+      shell: bash
+      run: |
+        # Check if value is set
+        if [[ -n "$_srt_rust_src_dir" ]]
+        then
+          # If value is set the directory must exist
+          if [[ -d "$_srt_rust_src_dir" ]]
+          then
+            cd "$_srt_rust_src_dir"
+          else
+            echo "'rust-src-dir' does not point to an existing directory" >&2
+            exit 1
+          fi
+        fi
+        if [[ -z "$_srt_toolchain" && ( -f "rust-toolchain" || -f "rust-toolchain.toml") ]]
+        then
+          # Install the toolchain as specified in the file
+          # rustup show is the old way that implicitly installed a toolchain
+          # rustup toolchain install is the new explicit way
+          # https://github.com/rust-lang/rustup/issues/3635#issuecomment-2343511297
+          rustup show active-toolchain || rustup toolchain install
+          if [[ -n $_srt_components ]]; then
+            rustup component add ${_srt_components//,/ }
+          fi
+          if [[ -n $_srt_targets ]]; then
+            rustup target add ${_srt_targets//,/ }
+          fi
+        else
+          if [[ -z "$_srt_toolchain" ]]
+          then
+            _srt_toolchain=stable
+          fi
+          rustup toolchain install ${_srt_toolchain//,/ } ${_srt_flags_targets}${_srt_flags_components} --profile minimal${_srt_flags_downgrade} --no-self-update
+          # Take the last element from the list
+          if [[ "$_srt_override" == "true" ]]
+          then
+            rustup override set ${_srt_toolchain//*,/ }
+          fi
+        fi
+
+    - id: versions
+      name: Print installed versions
+      shell: bash
+      # Switch to the Rust sub-directory
+      working-directory: ${{inputs.rust-src-dir || '.'}}
+      run: |
+        echo "rustc-version=$(rustc --version)" >> $GITHUB_OUTPUT
+        rustc --version --verbose
+        echo "cargo-version=$(cargo --version)" >> $GITHUB_OUTPUT
+        cargo --version --verbose
+        echo "rustup-version=$(rustup --version)" >> $GITHUB_OUTPUT
+        rustup --version
+
+        _srt_DATE=$(rustc --version --verbose | sed -ne 's/^commit-date: \(20[0-9][0-9]\)-\([01][0-9]\)-\([0-3][0-9]\)$/\1\2\3/p')
+        _srt_HASH=$(rustc --version --verbose | sed -ne 's/^commit-hash: //p')
+        echo "cachekey=$(echo $_srt_DATE$_srt_HASH | head -c12)" >> $GITHUB_OUTPUT
+
+    - name: Downgrade registry access protocol when needed
+      shell: bash
+      run: |
+        # Not all versions support setting CARGO_REGISTRIES_CRATES_IO_PROTOCOL
+        # On versions 1.66, 1.67, and 1.68.0-nightly the value "sparse" is still unstable.
+        # https://github.com/dtolnay/rust-toolchain/pull/69#discussion_r1107268108
+        # If we detect an incompatible value, set it to "git" which is always supported.
+        if [[ "${{steps.versions.outputs.rustc-version}}" =~ ^rustc\ (1\.6[67]\.|1\.68\.0-nightly) && "${CARGO_REGISTRIES_CRATES_IO_PROTOCOL}" == "sparse" ]]; then
+          echo "Downgrade cargo registry protocol to git"
+          echo "CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git" >> $GITHUB_ENV
+        fi
+
+    - name: Setup Rust Caching
+      if: inputs.cache == 'true'
+      uses: step-security/rust-cache@v2
+      with:
+        workspaces: ${{ inputs.cache-workspaces || inputs.rust-src-dir }}
+        cache-directories: ${{inputs.cache-directories}}
+        cache-on-failure: ${{inputs.cache-on-failure}}
+        cache-bin: ${{inputs.cache-bin}}
+        cache-provider: ${{inputs.cache-provider}}
+        cache-all-crates: ${{inputs.cache-all-crates}}
+        cache-workspace-crates: ${{inputs.cache-workspace-crates}}
+        save-if: ${{inputs.cache-save-if}}
+        key: ${{inputs.cache-key}}
+        shared-key: ${{inputs.cache-shared-key}}
