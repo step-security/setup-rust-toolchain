@@ -54,6 +54,7 @@ Afterward, the `components` and `target` specified via inputs are installed in a
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
 | `toolchain`              | Comma-separated list of Rustup toolchain specifier e.g. `stable`, `nightly`, `1.42.0`. The last version is the default.                                                            | stable        |
 | `target`                 | Additional target support to install e.g. `wasm32-unknown-unknown`                                                                                                                 |               |
+| `build-warnings`         | Sets the `build.warnings` config via the `CARGO_BUILD_WARNINGS` variable. (set to empty string to avoid overwriting existing flags)                                                | deny          |
 | `components`             | Comma-separated string of additional components to install e.g. `clippy, rustfmt`                                                                                                  |               |
 | `cache`                  | Automatically configure Rust cache (using [`step-security/rust-cache`])                                                                                                                 | true          |
 | `cache-directories`      | Propagates the value to [`step-security/rust-cache`]                                                                                                                                    |               |
@@ -66,8 +67,9 @@ Afterward, the `components` and `target` specified via inputs are installed in a
 | `cache-all-crates`       | Propagates the value to [`step-security/rust-cache`] as `cache-all-crates`                                                                                                              | false         |
 | `cache-workspace-crates` | Propagates the value to [`step-security/rust-cache`] as `cache-workspace-crates`                                                                                                        | false         |
 | `cache-save-if`          | Propagates the value to [`step-security/rust-cache`] as `save-if`                                                                                                                       | true          |
+| `cache-targets`          | Propagates the value to [`step-security/rust-cache`] as `cache-targets`                                                                                                                 | true          |
 | `matcher`                | Enable problem matcher to surface build messages and formatting issues                                                                                                             | true          |
-| `rustflags`              | Set the value of `RUSTFLAGS` (set to empty string to avoid overwriting existing flags)                                                                                             | "-D warnings" |
+| `rustflags`              | Set the value of `RUSTFLAGS` (set to empty string to avoid overwriting existing flags)                                                                                             | ""            |
 | `override`               | Setup the last installed toolchain as the default via `rustup override`                                                                                                            | true          |
 | `rust-src-dir`           | Path from root directory to directory with the Rust source directory (if its not in the root of the repository). Sets a default value for `cache-workspaces` that enables caching. |               |
 
@@ -75,16 +77,12 @@ Afterward, the `components` and `target` specified via inputs are installed in a
 
 ### RUSTFLAGS
 
-By default, this action sets the `RUSTFLAGS` environment variable to `-D warnings`.
-However, rustflags sources are mutually exclusive, so setting this environment variable omits any configuration through `target.*.rustflags` or `build.rustflags`.
+By default, this action leaves `RUSTFLAGS` unset and instead uses `CARGO_BUILD_WARNINGS=deny` (via the `build-warnings` input) to enforce warning-free compilations. This is supported by Cargo 1.97+ and avoids the mutual-exclusivity issue with `target.*.rustflags` and `build.rustflags`.
 
 - If `RUSTFLAGS` is already set, no modifications of the variable are made and the original value remains.
 - If `RUSTFLAGS` is unset and the `rustflags` input is empty (i.e., the empty string), then it will remain unset.
   Use this, if you want to prevent the value from being set because you make use of `target.*.rustflags` or `build.rustflags`.
 - Otherwise, the environment variable `RUSTFLAGS` is set to the content of `rustflags`.
-
-To prevent this from happening, set the `rustflags` input to an empty string, which will
-prevent the action from setting `RUSTFLAGS` at all, keeping any existing preferences.
 
 You can read more rustflags, and their load order, in the [Cargo reference].
 
